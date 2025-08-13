@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>GTA-style OpenStreetMap</title>
+  <meta name="description" content="Static GTA V–inspired map style over OpenStreetMap, no backend required." />
+  <link
+    href="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.css"
+    rel="stylesheet"
+  />
+  <style>
+    :root {
+      /* GTA-inspired palette */
+      --bg: #151515;
+      --land: #1c1c1c;
+      --water: #cfd3d6;
+      --park: #242a24;
+      --building: #2a2a2a;
+      --road: #ffffff;
+      --casing: #000000;
+      --label: #e8e8e8;
+      --label-halo: #000000;
+      --ui: #0f0f0f;
+      --ui-alt: #202020;
+      --accent: #6ae1ff;
+    }
+
+    html, body { height: 100%; margin: 0; background: var(--bg); color: #ddd; }
+    #map { position: absolute; inset: 0; }
+
+    /* Simple, unobtrusive UI */
+    .panel {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      background: color-mix(in srgb, var(--ui) 85%, transparent);
+      backdrop-filter: blur(6px);
+      border: 1px solid #2b2b2b;
+      border-radius: 10px;
+      padding: 10px 12px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+      max-width: 340px;
+      font: 13px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif;
+    }
+    .panel h1 {
+      margin: 0 0 6px;
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+      color: #f0f0f0;
+    }
+    .panel .row { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+    .panel label { white-space: nowrap; color: #cfcfcf; }
+    .panel input[type="text"] {
+      flex: 1;
+      background: var(--ui-alt);
+      border: 1px solid #3a3a3a;
+      color: #ddd;
+      border-radius: 8px;
+      padding: 6px 8px;
+      outline: none;
+    }
+    .panel button, .panel a.btn {
+      appearance: none;
+      border: 1px solid #3a3a3a;
+      background: var(--ui-alt);
+      color: #ddd;
+      border-radius: 8px;
+      padding: 6px 10px;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .panel button:hover, .panel a.btn:hover { border-color: #4e4e4e; }
+    .badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: #1e1e1e;
+      border: 1px solid #333;
+      color: #bbb;
+      font-size: 11px;
+    }
+    .attribution {
+      position: absolute; right: 8px; bottom: 8px;
+      background: color-mix(in srgb, var(--ui) 85%, transparent);
+      border: 1px solid #2b2b2b;
+      border-radius: 8px; padding: 6px 8px; color: #bbb;
+      font: 11px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif;
+    }
+    .attribution a { color: #a7e2ff; text-decoration: none; }
+    .attribution a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div id="map" aria-label="Map"></div>
+
+  <div class="panel" role="region" aria-label="Map controls">
+    <h1>GTA-style OSM <span class="badge">static</span></h1>
+    <div class="row">
+      <label for="key">Provider:</label>
+      <span id="provider" class="badge" title="Using public MapLibre demo tiles by default">Demo</span>
+    </div>
+    <div class="row">
+      <label for="key" title="Optional: MapTiler key for global vector tiles">MapTiler key</label>
+      <input id="key" type="text" placeholder="Optional — paste key and Apply" />
+      <button id="apply">Apply</button>
+    </div>
+    <div class="row">
+      <button id="toggleStyle">Toggle style</button>
+      <a id="resetMel" class="btn" href="#">Melbourne</a>
+      <a id="resetLS" class="btn" href="#">Los Santos-ish</a>
+    </div>
+  </div>
+
+  <div class="attribution" role="contentinfo">
+    © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>
+    contributors | Map rendering with <a href="https://maplibre.org/">MapLibre GL JS</a>.
+  </div>
+
+  <script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
+  <script>
+    // Basic config — paste a MapTiler key for wider coverage if you want
+    const qs = new URLSearchParams(location.search);
+    const initialKey = qs.get('key') || '';
+    const state = {
+      map: null,
+      gtaOn: true,
+      provider: 'demo', // 'demo' | 'maptiler'
+      key: initialKey
+    };
+
+    const mel = { center: [144.9631, -37.8136], zoom: 11.2 };
+    // Roughly downtown Los Angeles area (for Los Santos vibe); pure OSM, no game data used.
+    const losSantosish = { center: [-118.2437, 34.0522], zoom: 11.2 };
+
+    const elKey = document.getElementById('key');
+    const elProvider = document.getElementById('provider');
+    const elApply = document.getElementById('apply');
+    const elToggle = document.getElementById('toggleStyle');
+    const elResetMel = document.getElementById('resetMel');
+    const elResetLS = document.getElementById('resetLS');
+
+    elKey.value = initialKey;
+
+    function providerLabel() {
+      elProvider.textContent = state.provider === 'maptiler' ? 'MapTiler' : 'Demo';
+      elProvider.title = state.provider === 'maptiler'
+        ? 'MapTiler vector tiles (key provided)'
+        : 'Public MapLibre demo tiles (limited coverage)';
+    }
+
+    function getStyleURL() {
+      if (state.provider === 'maptiler' && state.key) {
+        // MapTiler Basic vector style; free tier suitable for dev/non-commercial use
+        return `https://api.maptiler.com/maps/basic/style.json?key=${state.key}`;
+      }
+      // MapLibre demo style — works without keys; limited but good for testing
+      return 'https://demotiles.maplibre.org/style.json';
+    }
+
+    function initMap(view = mel) {
+      if (state.map) {
+        state.map.remove();
+      }
+      const map = new maplibregl.Map({
+        container: 'map',
+        style: getStyleURL(),
+        center: view.center,
+        zoom: view.zoom,
+        hash: true,
+        attributionControl: true,
+        dragRotate: false, pitchWithRotate: false
+      });
+      map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+
+      // Apply GTA style when style loads (and re-apply on any style reloads)
+      map.on('style.load', () => {
+        if (state.gtaOn) applyGTAStyle(map);
+      });
+
+      // Keep pointer for later
+      state.map = map;
+    }
+
+    function applyGTAStyle(map) {
+      const backgroundColor = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#151515';
+      const landColor = getComputedStyle(document.documentElement).getPropertyValue('--land').trim() || '#1c1c1c';
+      const waterColor = getComputedStyle(document.documentElement).getPropertyValue('--water').trim() || '#cfd3d6';
+      const parkColor = getComputedStyle(document.documentElement).getPropertyValue('--park').trim() || '#242a24';
+      const buildingColor = getComputedStyle(document.documentElement).getPropertyValue('--building').trim() || '#2a2a2a';
+      const roadColor = getComputedStyle(document.documentElement).getPropertyValue('--road').trim() || '#ffffff';
+      const casingColor = getComputedStyle(document.documentElement).getPropertyValue('--casing').trim() || '#000000';
+      const labelColor = getComputedStyle(document.documentElement).getPropertyValue('--label').trim() || '#e8e8e8';
+      const labelHalo = getComputedStyle(document.documentElement).getPropertyValue('--label-halo').trim() || '#000000';
+
+      const style = map.getStyle();
+      if (!style || !style.layers) return;
+
+      // Background
+      style.layers
+        .filter(l => l.type === 'background')
+        .forEach(l => {
+          map.setPaintProperty(l.id, 'background-color', backgroundColor);
+        });
+
+      // Land tint (some styles have a "land" fill)
+      style.layers
+        .filter(l => l.type === 'fill' && /land|landcover|landuse/.test(l['source-layer'] || l.id))
+        .forEach(l => {
+          map.setPaintProperty(l.id, 'fill-color', landColor);
+          if (map.getPaintProperty(l.id, 'fill-opacity') == null) {
+            map.setPaintProperty(l.id, 'fill-opacity', 1.0);
+          }
+        });
+
+      // Water
+      style.layers
+        .filter(l => (l.type === 'fill' || l.type === 'line') && /water/.test(l['source-layer'] || l.id))
+        .forEach(l => {
+          const prop = l.type === 'fill' ? 'fill-color' : 'line-color';
+          map.setPaintProperty(l.id, prop, waterColor);
+        });
+
+      // Parks / vegetation
+      style.layers
+        .filter(l => l.type === 'fill' && /(park|wood|forest|grass|cemetery|pitch|meadow)/.test(l['source-layer'] || l.id))
+        .forEach(l => {
+          map.setPaintProperty(l.id, 'fill-color', parkColor);
+        });
+
+      // Buildings
+      style.layers
+        .filter(l => l.type === 'fill' && /building/.test(l['source-layer'] || l.id))
+        .forEach(l => {
+          map.setPaintProperty(l.id, 'fill-color', buildingColor);
+          try { map.setPaintProperty(l.id, 'fill-outline-color', '#000000'); } catch {}
+        });
+
+      // Roads (transportation)
+      const roadLayers = style.layers.filter(l =>
+        (l.type === 'line' || l.type === 'fill') &&
+        /(transportation|road|highway|aeroway)/.test(l['source-layer'] || l.id)
+      );
+
+      roadLayers.forEach(l => {
+        // Set core stroke to white
+        if (l.type === 'line') {
+          map.setPaintProperty(l.id, 'line-color', roadColor);
+          // Width scales by zoom and road class (if available)
+          const widthByClass = [
+            'match', ['get', 'class'],
+            'motorway', ['interpolate', ['exponential', 1.4], ['zoom'], 6, 0.6, 10, 2.2, 14, 6, 16, 12],
+            'trunk',    ['interpolate', ['exponential', 1.4], ['zoom'], 6, 0.55, 10, 2.0, 14, 5.5, 16, 10],
+            'primary',  ['interpolate', ['exponential', 1.4], ['zoom'], 6, 0.5, 10, 1.8, 14, 4.8, 16, 9],
+            'secondary',['interpolate', ['exponential', 1.4], ['zoom'], 6, 0.45, 10, 1.6, 14, 4.2, 16, 8],
+            'tertiary', ['interpolate', ['exponential', 1.4], ['zoom'], 6, 0.4, 10, 1.4, 14, 3.6, 16, 7],
+            'minor',    ['interpolate', ['exponential', 1.4], ['zoom'], 6, 0.35, 10, 1.2, 14, 3.0, 16, 6],
+            'service',  ['interpolate', ['exponential', 1.4], ['zoom'], 6, 0.25, 10, 0.9, 14, 2.2, 16, 5],
+            /* default */ ['interpolate', ['exponential', 1.4], ['zoom'], 6, 0.3, 10, 1.2, 14, 3.0, 16, 6]
+          ];
+          try { map.setPaintProperty(l.id, 'line-width', widthByClass); } catch {}
+          try { map.setPaintProperty(l.id, 'line-opacity', 1); } catch {}
+        }
+      });
+
+      // Road casings if present (layers often include "casing" or "case")
+      style.layers
+        .filter(l => l.type === 'line' && /(casing|case)/i.test(l.id))
+        .forEach(l => {
+          map.setPaintProperty(l.id, 'line-color', casingColor);
+          // Slightly wider than the corresponding road width
+          try {
+            const roadWidth = map.getPaintProperty(l.id.replace(/-?casing/i, ''), 'line-width') || 2;
+            const casingWidth = ['+', ['coalesce', roadWidth, 2], 1.2];
+            map.setPaintProperty(l.id, 'line-width', casingWidth);
+          } catch {
+            map.setPaintProperty(l.id, 'line-width', ['interpolate', ['linear'], ['zoom'], 6, 0.8, 16, 14]);
+          }
+          try { map.setPaintProperty(l.id, 'line-opacity', 1); } catch {}
+        });
+
+      // Boundaries toned down
+      style.layers
+        .filter(l => l.type === 'line' && /(boundary|admin)/i.test(l.id))
+        .forEach(l => {
+          map.setPaintProperty(l.id, 'line-color', '#404040');
+          map.setPaintProperty(l.id, 'line-dasharray', [2, 2]);
+          map.setPaintProperty(l.id, 'line-width', ['interpolate', ['linear'], ['zoom'], 4, 0.4, 12, 1]);
+        });
+
+      // Labels: light text, dark halo; icons mostly hidden
+      style.layers
+        .filter(l => l.type === 'symbol')
+        .forEach(l => {
+          if (map.getLayoutProperty(l.id, 'text-field')) {
+            try { map.setPaintProperty(l.id, 'text-color', labelColor); } catch {}
+            try { map.setPaintProperty(l.id, 'text-halo-color', labelHalo); } catch {}
+            try { map.setPaintProperty(l.id, 'text-halo-width', 1.0); } catch {}
+            try { map.setPaintProperty(l.id, 'text-halo-blur', 0.2); } catch {}
+          }
+          // Hide icons for a cleaner GTA paper-map vibe
+          try { map.setLayoutProperty(l.id, 'icon-size', 0.8); } catch {}
+          try { map.setPaintProperty(l.id, 'icon-opacity', 0.0); } catch {}
+        });
+    }
+
+    function removeGTAStyle(map) {
+      // Reload the style to its original design
+      map.setStyle(getStyleURL());
+    }
+
+    // Wire UI
+    elApply.addEventListener('click', () => {
+      state.key = elKey.value.trim();
+      state.provider = state.key ? 'maptiler' : 'demo';
+      providerLabel();
+      initMap(state.map ? { center: state.map.getCenter().toArray(), zoom: state.map.getZoom() } : mel);
+    });
+
+    elToggle.addEventListener('click', () => {
+      state.gtaOn = !state.gtaOn;
+      if (state.gtaOn) {
+        applyGTAStyle(state.map);
+        elToggle.textContent = 'Toggle style';
+      } else {
+        removeGTAStyle(state.map);
+        elToggle.textContent = 'Toggle style';
+      }
+    });
+
+    elResetMel.addEventListener('click', (e) => { e.preventDefault(); state.map?.flyTo({ center: mel.center, zoom: mel.zoom }); });
+    elResetLS.addEventListener('click', (e) => { e.preventDefault(); state.map?.flyTo({ center: losSantosish.center, zoom: losSantosish.zoom }); });
+
+    // Init
+    providerLabel();
+    initMap(mel);
+  </script>
+</body>
+</html>
